@@ -5,11 +5,25 @@ import collections
 import gym
 import numpy as np
 import chainer
+import cupy
 from chainer import functions as F
 from chainer import links as L
 from chainer import optimizers
 
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
+
+# ====================
+# Hyperparameters
+# ====================
+CAPACITY = 100000
+M = 1000
+BATCH_SIZE = 64
+GPU = 0 # cpu -1 , gpu id
+TAU = 1e-2
+REWARD_SCALE= 1e-3
+RENDER = True
+GAMMA = 0.99
+REPLAY_START_SIZE=500
 
 # ===================
 # Utilities
@@ -34,15 +48,23 @@ class QNet(chainer.Chain):
 
             )
     def __call__(self, s, a):
-        s_ = self.bn0(s)
+        #s_ = self.bn0(s)
+        #x = F.concat( (s_, a), axis=1 )
+        #h = F.relu( self.bn1( self.l0(x) ) )
+        #h = F.relu( self.bn2( self.l1(h) ) )
+        s_ = s
         x = F.concat( (s_, a), axis=1 )
-        h = F.relu( self.bn1( self.l0(x) ) )
-        h = F.relu( self.bn2( self.l1(h) ) )
+        h = F.relu( self.l0(x)  )
+        h = F.relu( self.l1(h)  )
         return self.l2(h)
 
 class Critic:
     def __init__(self, s_dim, a_dim):
         self.Q = QNet(s_dim, a_dim)
+
+        if GPU >= 0:
+            self.Q.to_gpu()
+
         self.Q_ = copy.deepcopy(self.Q)
         
         self.optimizer = optimizers.Adam()
@@ -75,9 +97,13 @@ class Policy(chainer.Chain):
             )
 
     def __call__(self, x):
-        x_ = self.bn0(x)
-        h = F.relu( self.bn1( self.l0(x_) ) )
-        h = F.relu( self.bn2( self.l1(h) ) )
+        #x_ = self.bn0(x)
+        #h = F.relu( self.bn1( self.l0(x_) ) )
+        #h = F.relu( self.bn2( self.l1(h) ) )
+        #h = F.tanh( self.l2(h) )
+        x_ = x
+        h = F.relu( self.l0(x_) )
+        h = F.relu( self.l1(h) )
         h = F.tanh( self.l2(h) )
         return self.squash(h, 
                            self.xp.asarray(self.high),
@@ -91,6 +117,10 @@ class Policy(chainer.Chain):
 class Actor:
     def __init__(self, s_dim, a_dim, a_high, a_low):
         self.policy = Policy(s_dim, a_dim, a_high, a_low)
+        
+        if GPU >= 0:
+            self.policy.to_gpu()
+
         self.policy_ = copy.deepcopy(self.policy)
 
         self.optimizer = optimizers.Adam(alpha=1e-4)
@@ -175,18 +205,6 @@ class ReplayMemory:
         return random.sample(self.buf, n)
 
 
-# ====================
-# Hyperparameters
-# ====================
-CAPACITY = 100000
-M = 1000
-BATCH_SIZE = 64
-GPU = -1 # cpu -1 , gpu id
-TAU = 1e-2
-REWARD_SCALE= 1e-3
-RENDER = True
-GAMMA = 0.99
-
 
 # ====================
 # Main loop
@@ -195,20 +213,21 @@ def noise():
     return np.random.normal(scale=0.4)
 
 def main():
-    fig, ax = plt.subplots(1, 1)
+    #fig, ax = plt.subplots(1, 1)
 
     env = gym.make('Pendulum-v0')
     s_dim = env.observation_space.low.size
     a_dim = env.action_space.low.size
     a_high = env.action_space.high
     a_low = env.action_space.low
+    #a_num = env.action_space.n
     
-    if GPU >= 0:
-        chainer.cuda.get_device(gpu).use()
-        # TODO gpu setting
+
 
     agent = Agent(s_dim, a_dim, a_high, a_low)
 
+    if GPU >= 0:
+        chainer.cuda.get_device(GPU).use()
 
     Rs = []
     for episode in range(M):
@@ -217,7 +236,7 @@ def main():
         R = 0.0
         t = 0
 
-        while not done and t < env.spec.timestep_limit:
+        while not done and t < env.spec.tags.get('wrapper_config.TimeLimit.max_episode_steps'):
             
             # get next action
             a = agent.actor.predict(s) + noise()
@@ -231,19 +250,20 @@ def main():
             R += r
 
             agent.observe( (s, a, r*REWARD_SCALE, s_, done) )
-            agent.update()
+            if len(agent.D.buf) >= REPLAY_START_SIZE:
+                agent.update()
 
             s = s_
 
             t += 1
         
-        #print("Total Reward:", R)
+        print("Total Reward:", R)
         
         Rs.append(R)
 
-        ax.clear()
-        ax.plot(Rs)
-        fig.canvas.draw()
+        #ax.clear()
+        #ax.plot(Rs)
+        #fig.canvas.draw()
 
 if __name__ == "__main__":
     main()
