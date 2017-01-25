@@ -18,14 +18,16 @@ import matplotlib.pyplot as plt
 # ====================
 CAPACITY = 100000
 M = 1000
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 GPU = 0 # cpu -1 , gpu id
 TAU = 1e-2
-REWARD_SCALE= 1e-3
+REWARD_SCALE= 1e-2
 RENDER = True
 GAMMA = 0.99
 REPLAY_START_SIZE=500
-
+STATE_LENGTH = 2  # Number of most recent frames to produce the input to the network
+FRAME_WIDTH = 84  # Resized frame width
+FRAME_HEIGHT = 84  # Resized frame height
 # ===================
 # Utilities
 # ===================
@@ -38,16 +40,35 @@ def soft_update(src, dst, tau):
 # ===================
 class QNet(chainer.Chain):
     def __init__(self, s_dim, a_dim):
+
+        initializer = chainer.initializers.HeNormal()
+        c1 = 16
+        c2 = 32
+        c3 = 32
+        fc_unit=250
+
         super(QNet, self).__init__(
-            l0 = L.Linear(s_dim + a_dim, 100),
-            l1 = L.Linear(100, 50),
-            l2 = L.Linear(50, 1, wscale=1e-3),
+            conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
+            conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
+            conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
+            fc0=L.Linear(None, fc_unit, initialW=initializer),
+            fc1=L.Linear(fc_unit, 1, initialW=initializer),
+            bnorm0=L.BatchNormalization(c1),
+            bnorm1=L.BatchNormalization(c2),
+            bnorm2=L.BatchNormalization(c3),
             )
     def __call__(self, s, a):
-        x = F.concat( (s, a), axis=1 )
-        h = F.relu( self.l0(x)  )
-        h = F.relu( self.l1(h)  )
-        return self.l2(h)        
+
+        s = s/255.
+        h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(s))), 2, stride=2)
+        h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
+        h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
+        h = F.reshape(h, (h.shape[0], h.shape[1]*h.shape[2]*h.shape[3]))
+        h = F.concat( (h, a), axis=1 )
+        h = F.relu(self.fc0(h))
+        y = self.fc1(h)
+
+        return y
 
 class Critic:
     def __init__(self, s_dim, a_dim=1):
@@ -88,24 +109,42 @@ class Policy(chainer.Chain):
 
         self.low = a_low
         self.high = a_high
-
+        self.a_dim = 1
+        
         initializer = chainer.initializers.HeNormal()
+        c1 = 16
+        c2 = 32
+        c3 = 32
+        fc_unit = 250
+
         super(Policy, self).__init__(
-            l0 = L.Linear(s_dim, 64),
-            l1 = L.Linear(64, 1, initialW=initializer),
+            conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
+            conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
+            conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
+            fc0=L.Linear(None, fc_unit, initialW=initializer),
+            fc1=L.Linear(fc_unit, self.a_dim, initialW=initializer),
+            bnorm0=L.BatchNormalization(c1),
+            bnorm1=L.BatchNormalization(c2),
+            bnorm2=L.BatchNormalization(c3)
             )
 
     def __call__(self, x):
-        h = F.relu( self.l0(x) )
-        h = self.l1(h)
-        return self.squash(h, 
+        x = x/255.
+        h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(x))), 2, stride=2)
+        h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
+        h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
+
+        h = F.relu(self.fc0(h))
+        y = self.fc1(h)
+
+        return self.squash(y, 
                            self.xp.asarray(self.high),
                            self.xp.asarray(self.low))
 
     def squash(self, x, high, low):
         center = (high + low) / 2
         scale = (high - low) / 2
-        return x*scale + center
+        return F.tanh(x)*scale + center
 
 class Actor:
     def __init__(self, s_dim, a_num, a_low, a_high):
@@ -125,6 +164,7 @@ class Actor:
             xp.asarray(states, dtype=np.float32), axis=0)
         with chainer.no_backprop_mode():
             a = self.policy(states).data
+
         return chainer.cuda.to_cpu(a)
 
     def target_predict(self, states):
@@ -147,8 +187,11 @@ class Actor:
 # ====================
 # Agent
 # ====================
+K=3
 class Agent:
     def __init__(self, s_dim, a_num, a_low, a_high):
+        self.low = a_low
+        self.high = a_high
         self.s_dim = s_dim
         self.actor = Actor(s_dim, a_num, a_low, a_high)
         self.critic = Critic(s_dim, 1) # TODO action dim
@@ -186,13 +229,13 @@ class Agent:
             #    dtype=np.float32)
             a_neighbors = xp.expand_dims(
                 xp.asarray(
-                [ self.neighbors(proto_a[i])[j] for i in range(n) for j in range(2) ],
+                [ self.neighbors(proto_a[i])[j] for i in range(n) for j in range(K) ],
                 dtype=np.float32
                 ),
                 axis=1
                 )
             states = xp.asarray(
-                [s_[i] for i in range(n) for j in range(2)],
+                [s_[i] for i in range(n) for j in range(K)],
                 dtype=np.float32)
             
             q_val = self.critic.target_predict(
@@ -200,9 +243,9 @@ class Agent:
                 a_neighbors)
             
             for i in range(n):
-                offset = i*2
-                acts = a_neighbors[offset:offset+2]
-                q_vals = q_val[offset:offset+2]
+                offset = i*K
+                acts = a_neighbors[offset:offset+K]
+                q_vals = q_val[offset:offset+K]
                 actions[i][0] = acts[ np.argmax(q_vals) ][0]
             
             """
@@ -236,8 +279,27 @@ class Agent:
 
 
     def neighbors(self, a, k=1):
+        neighbor = np.empty( (K,), dtype=np.int32)
+
+        tmp = a.astype(np.int32)[0]
+    
+        if tmp <= self.low:
+            tmp = self.low
+            neighbor[1] = tmp+1
+            neighbor[2] = tmp+2
+        elif tmp >= self.high:
+            tmp = self.high
+            neighbor[1] = tmp-1
+            neighbor[2] = tmp-2
+        else:
+            neighbor[1] = tmp+1
+            neighbor[2] = tmp-1
+
+        neighbor[0] = tmp
+
         xp = self.critic.Q.xp
-        return xp.asarray([0,1], dtype=np.int32)
+        #print neighbor
+        return xp.asarray(neighbor, dtype=np.int32)
 
 # ====================
 # Replay Mem
@@ -256,27 +318,53 @@ class ReplayMemory:
         n = min(n, len(self.buf))
         return random.sample(self.buf, n)
 
+# ====================
+# Preprocessor
+# ====================
+
+from skimage.color import rgb2gray
+from skimage.transform import resize
+class Preprocessor:
+    def __init__(self):
+        self.state = None
+    def init_state(self, obs):
+        processed_obs = self._preprocess_observation(obs)
+        state = [processed_obs for _ in xrange(STATE_LENGTH)]
+        self.state = np.stack(state, axis=0)
+    def obs2state(self, obs):
+        processed_obs = self._preprocess_observation(obs)
+        self.state = np.concatenate((
+                self.state[1:, :, :],
+                processed_obs[np.newaxis]),
+                                    axis=0)
+        return self.state
+    def _preprocess_observation(self, obs):
+        return np.asarray(resize(rgb2gray(obs), (FRAME_WIDTH, FRAME_HEIGHT))*255,
+                          dtype=np.uint8)
+        
 
 
 # ====================
 # Main loop
 # ====================
 def noise():
-    return np.random.normal(scale=0.4)
+    return np.random.normal(scale=1.0)
 
 def main():
     fig, ax = plt.subplots(1, 1)
 
-    env = gym.make('CartPole-v0')
+    env = gym.make('Pong-v0')
     s_dim = env.observation_space.low.size
     #a_dim = env.action_space.size
     #a_high = env.action_space.high
     #a_low = env.action_space.low
     a_low = 0
-    a_high = 1
+    a_high = 5
     
     a_num = env.action_space.n
     print ("DEBUG %d %d")%(s_dim, a_num)
+
+    preprocessor = Preprocessor()
 
     agent = Agent(s_dim, a_num, a_low, a_high)
 
@@ -286,17 +374,22 @@ def main():
     Rs = []
 
     for episode in range(M):
-        s = env.reset()
+        obs = env.reset()
+
+        preprocessor.init_state(obs)
+
         done = False
         R = 0.0
         t = 0
+
+        s = preprocessor.state
 
         while not done and t < env.spec.tags.get('wrapper_config.TimeLimit.max_episode_steps'):
             
             # get next action
             proto_a = agent.actor.predict(s) + noise() # proto_a is on cpu
             neighbors = agent.neighbors(proto_a) # neighbors on gpu
-        
+
             xp = agent.critic.Q.xp
             states = xp.asarray(
                 [s for _ in range(len(neighbors))], 
@@ -311,7 +404,9 @@ def main():
             a = chainer.cuda.to_cpu(neighbors[np.argmax(q_val)])
 
             # execute action
-            s_, r, done, info = env.step(a)
+            obs_, r, done, info = env.step(a)
+            
+            s_ = preprocessor.obs2state(obs_)
             
             if RENDER:
                 env.render()
@@ -320,6 +415,8 @@ def main():
 
             agent.observe( (s, a, r*REWARD_SCALE, s_, done) )
             if len(agent.D.buf) >= REPLAY_START_SIZE:
+                print ("Updating...")
+                print ("Reward %f")%(R)
                 agent.update()
 
             s = s_
