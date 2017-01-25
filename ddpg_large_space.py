@@ -36,34 +36,74 @@ def soft_update(src, dst, tau):
         d.data[:] = tau*s.data + (1-tau)*d.data
 
 # ===================
+# Feature Extractor
+# ===================
+class FeatureExtractor(chainer.Chain):
+    def __init__(self):
+        c1 = 16
+        c2 = 32
+        c3 = 32
+        
+        super(FeatureExtractor, self).__init__(
+            conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
+            conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
+            conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
+            bnorm0=L.BatchNormalization(c1),
+            bnorm1=L.BatchNormalization(c2),
+            bnorm2=L.BatchNormalization(c3),
+            )
+
+    def __call__(self, s):
+        s = s/255.
+        h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(s))), 2, stride=2)
+        h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
+        h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
+        return h
+
+# ===================
 # Critic
 # ===================
 class QNet(chainer.Chain):
     def __init__(self, s_dim, a_dim):
 
         initializer = chainer.initializers.HeNormal()
-        c1 = 16
-        c2 = 32
-        c3 = 32
+        #c1 = 16
+        #c2 = 32
+        #c3 = 32
         fc_unit=250
+        self.fe = FeatureExtractor()
+        if GPU >= 0:
+            self.fe.to_gpu()
 
         super(QNet, self).__init__(
-            conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
-            conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
-            conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
+            #conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
+            #conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
+            #conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
             fc0=L.Linear(None, fc_unit, initialW=initializer),
             fc1=L.Linear(fc_unit, 1, initialW=initializer),
-            bnorm0=L.BatchNormalization(c1),
-            bnorm1=L.BatchNormalization(c2),
-            bnorm2=L.BatchNormalization(c3),
+            #bnorm0=L.BatchNormalization(c1),
+            #bnorm1=L.BatchNormalization(c2),
+            #bnorm2=L.BatchNormalization(c3),
             )
     def __call__(self, s, a):
 
-        s = s/255.
-        h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(s))), 2, stride=2)
-        h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
-        h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
+        #s = s/255.
+        #h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(s))), 2, stride=2)
+        #h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
+        #h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
+        h = self.fe(s)
         h = F.reshape(h, (h.shape[0], h.shape[1]*h.shape[2]*h.shape[3]))
+        h = F.concat( (h, a), axis=1 )
+        h = F.relu(self.fc0(h))
+        y = self.fc1(h)
+
+        return y
+
+    def feature(self, s):
+        return self.fe(s)
+
+    def predict(self, f, a):
+        h = F.reshape(f, (f.shape[0], f.shape[1]*f.shape[2]*f.shape[3]))
         h = F.concat( (h, a), axis=1 )
         h = F.relu(self.fc0(h))
         y = self.fc1(h)
@@ -98,8 +138,14 @@ class Critic:
 
     def target_predict(self, s, a):
         with chainer.no_backprop_mode():
-            q = self.Q_(s, a).data
+            #q = self.Q_(s, a).data
+            q = self.Q_.predict(s, a).data
         return chainer.cuda.to_cpu(q)
+
+    def feature(self, s):
+        with chainer.no_backprop_mode():
+            f = self.Q.feature(s).data
+        return f
 
 # ===================
 # Actor
@@ -234,12 +280,20 @@ class Agent:
                 ),
                 axis=1
                 )
-            states = xp.asarray(
-                [s_[i] for i in range(n) for j in range(K)],
+
+            f = self.critic.feature(s_)
+
+            #states = xp.asarray(
+            #    [s_[i] for i in range(n) for j in range(K)],
+            #    dtype=np.float32)
+            features = xp.asarray(
+                [f[i] for i in range(n) for j in range(K)],
                 dtype=np.float32)
+            print features.shape
             
             q_val = self.critic.target_predict(
-                states,
+                #states,
+                features,
                 a_neighbors)
             
             for i in range(n):
