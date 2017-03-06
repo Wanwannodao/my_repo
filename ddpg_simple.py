@@ -275,76 +275,22 @@ class Agent:
             actions = xp.empty((n,1), dtype=np.float32)
             proto_a = self.actor.target_predict(s_)
 
-
-            a_neighbors = xp.expand_dims(
-                xp.asarray(
-                [ self.neighbors(proto_a[i])for i in range(n)],
-                dtype=np.float32
-                ).T,
-                axis=2)
-
-            
-            #print a_neighbors
-            #f = self.critic.feature(s_)
-            q_val = np.empty((K,n), dtype=np.float32)
-            for i in xrange(K):
-                q_val[i] = self.critic.target_predict(
-                    #f,
-                    s_,
-                    a_neighbors[i]
-                    ).reshape(n)
-            q_val = q_val.T
-            a_neighbors = a_neighbors.T.reshape(n, K, 1)
             for i in range(n):
-                acts = a_neighbors[i]
-                actions[i][0] = acts[ np.argmax(q_val[i]) ][0]
-            """
-            Mainly reduce computation cost
-            a_neighbors = xp.expand_dims(
-                xp.asarray(
-                [ self.neighbors(proto_a[i])[j] for i in range(n) for j in range(K) ],
-                dtype=np.float32
-                ),
-                axis=1
-                )
-            f = self.critic.feature(s_)
-            features = xp.asarray(
-                [f[i] for i in range(n) for j in range(K)],
-                dtype=np.float32)
-            q_val = self.critic.target_predict(
-                features,
-                a_neighbors)
+                c = math.ceil(proto_a[i])
+                if c > self.high:
+                    c = self.high
+                f = math.floor(proto_a[i])
+                if f < self.low:
+                    f = self.low
 
-            for i in range(n):
-                offset = i*K
-                acts = a_neighbors[offset:offset+K]
-                q_vals = q_val[offset:offset+K]
-                actions[i][0] = acts[ np.argmax(q_vals) ][0]
-             
-            """
+                h = c - proto_a[i]
+                l = proto_a[i] - f
+                if h < l:
+                    a = c
+                else:
+                    a = f
+                actions[i][0] = a
 
-            """
-            Naive
-            #a_neighbors = xp.asarray( 
-            #    [ xp.expand_dims(self.neighbors(proto_a[i]), axis=1) for i in range(n)],
-            #    dtype=np.float32)
-            #states = xp.asarray(
-            #    [s_[i] for i in range(n) for j in range(K)],
-            #    dtype=np.float32)
-            for i in range(n):
-                a_neighbors = self.neighbors(proto_a[i])
-            
-                states = xp.asarray(
-                    [s_[i] for _ in range(len(a_neighbors))], 
-                    dtype=np.float32)
-
-                q_val = self.critic.target_predict(
-                    states, 
-                    xp.expand_dims(a_neighbors.astype(np.float32), axis=1)
-                    )
-
-                actions[i][0] = a_neighbors[np.argmax(q_val)]
-            """
 
             q_ = F.reshape(
             self.critic.Q_(s_, actions),
@@ -360,29 +306,6 @@ class Agent:
         self.actor.target_update()
 
 
-    def neighbors(self, a, k=1):
-        neighbor = np.empty( (K,), dtype=np.int32)
-
-        tmp = a.astype(np.int32)[0]
-
-        if tmp <= self.low:
-            tmp = self.low
-            neighbor[1] = tmp+1
-            neighbor[2] = tmp+2
-        elif tmp >= self.high:
-            tmp = self.high
-            neighbor[1] = tmp-1
-            neighbor[2] = tmp-2
-        else:
-            neighbor[1] = tmp+1
-            neighbor[2] = tmp-1
-        
-
-        neighbor[0] = tmp
-
-        xp = self.critic.Q.xp
-        #print neighbor
-        return xp.asarray(neighbor, dtype=np.int32)
 
 # ====================
 # Replay Mem
@@ -433,8 +356,7 @@ class Preprocessor:
 # ====================
 # Main loop
 # ====================
-def noise():
-    return np.random.normal(scale=1.0)
+import math
 
 MIN_EPSILON=0.01
 STEPS_TO_DECAY_EPSILON=500000
@@ -443,9 +365,7 @@ def main():
 
     env = gym.make('Pong-v0')
     s_dim = env.observation_space.low.size
-    #a_dim = env.action_space.size
-    #a_high = env.action_space.high
-    #a_low = env.action_space.low
+
     a_low = 0
     a_high = 5
     
@@ -482,18 +402,21 @@ def main():
             # get next action
             #proto_a = agent.actor.predict(state) + noise() # proto_a is on cpu
             proto_a = agent.actor.predict(state)
-            neighbors = agent.neighbors(proto_a) # neighbors on gpu
-            ss = xp.asarray(
-                [s for _ in xrange(K)],
-                dtype=np.float32)
 
-            q_val = agent.critic.predict(
-                ss,
-                xp.expand_dims(neighbors.astype(np.float32),
-                               axis=1)                
-                )
-
-            a = chainer.cuda.to_cpu(neighbors[int(xp.argmax(q_val))])
+            c = math.ceil(proto_a[0])
+            if c > a_high:
+                c = a_high
+        
+            f = math.floor(proto_a[0])
+            if f < a_low:
+                f = a_low
+            h = c - proto_a[0]
+            l = proto_a[0] - f
+            if h < l:
+                a = int(c)
+            else:
+                a = int(f)
+            print a
             
             epsilon = 1.0 if agent.D.len() < REPLAY_START_SIZE else \
                 max(MIN_EPSILON, np.interp(

@@ -18,15 +18,14 @@ import matplotlib.pyplot as plt
 # ====================
 CAPACITY = 100000
 M = 1000
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 GPU = 0 # cpu -1 , gpu id
 TAU = 1e-2
-#REWARD_SCALE= 1e-2
-REWARD_SCALE=1
+REWARD_SCALE= 1e-2
 RENDER = True
 GAMMA = 0.99
 REPLAY_START_SIZE=500
-STATE_LENGTH = 4  # Number of most recent frames to produce the input to the network
+STATE_LENGTH = 2  # Number of most recent frames to produce the input to the network
 FRAME_WIDTH = 84  # Resized frame width
 FRAME_HEIGHT = 84  # Resized frame height
 # ===================
@@ -39,7 +38,6 @@ def soft_update(src, dst, tau):
 # ===================
 # Feature Extractor
 # ===================
-"""
 class FeatureExtractor(chainer.Chain):
     def __init__(self):
         c1 = 16
@@ -61,7 +59,7 @@ class FeatureExtractor(chainer.Chain):
         h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
         h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
         return h
-"""
+
 # ===================
 # Critic
 # ===================
@@ -69,49 +67,38 @@ class QNet(chainer.Chain):
     def __init__(self, s_dim, a_dim):
 
         initializer = chainer.initializers.HeNormal()
-        c1 = 16
-        c2 = 32
-        c3 = 32
+
         fc_unit=250
-        #self.fe = FeatureExtractor()
-        #if GPU >= 0:
-        #    self.fe.to_gpu()
+        self.fe = FeatureExtractor()
+        if GPU >= 0:
+            self.fe.to_gpu()
 
         super(QNet, self).__init__(
-            conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
-            conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
-            conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
+
             fc0=L.Linear(None, fc_unit, initialW=initializer),
-            fc1=L.Linear(fc_unit, 64, initialW=initializer),
-            fc2=L.Linear(64, 1, initialW=initializer),
-            bnorm0=L.BatchNormalization(c1),
-            bnorm1=L.BatchNormalization(c2),
-            bnorm2=L.BatchNormalization(c3),
+            fc1=L.Linear(fc_unit, 1, initialW=initializer),
+
             )
     def __call__(self, s, a):
 
-        s = s/255.
-        h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(s))), 2, stride=2)
-        h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
-        h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
-        #h = self.fe(s)
-        h = F.reshape(h, (h.shape[0], h.shape[1]*h.shape[2]*h.shape[3]))
+        f = self.fe(s)
+        h = F.reshape(f, (f.shape[0], f.shape[1]*f.shape[2]*f.shape[3]))
         h = F.concat( (h, a), axis=1 )
         h = F.relu(self.fc0(h))
-        h = F.relu(self.fc1(h))
-        y = self.fc2(h)
+        y = self.fc1(h)
+
+        return y,f
+
+    def feature(self, s):
+        return self.fe(s)
+
+    def predict(self, f, a):
+        h = F.reshape(f, (f.shape[0], f.shape[1]*f.shape[2]*f.shape[3]))
+        h = F.concat( (h, a), axis=1 )
+        h = F.relu(self.fc0(h))
+        y = self.fc1(h)
 
         return y
-
-    #def feature(self, s):
-    #    return self.fe(s)
-
-    #def predict(self, f, a):
-    #    h = F.reshape(f, (f.shape[0], f.shape[1]*f.shape[2]*f.shape[3]))
-    #    h = F.concat( (h, a), axis=1 )
-    #    h = F.relu(self.fc0(h))
-    #    y = self.fc1(h)
-    #    return y
 
 class Critic:
     def __init__(self, s_dim, a_dim=1):
@@ -136,16 +123,13 @@ class Critic:
 
     def predict(self, s, a):
         with chainer.no_backprop_mode():
-            q = self.Q(s, a).data
-        return q      
-        #return chainer.cuda.to_cpu(q)
+            q = self.Q.predict(s, a).data
+        return chainer.cuda.to_cpu(q)
 
     def target_predict(self, s, a):
         with chainer.no_backprop_mode():
-            q = self.Q_(s, a).data
-            #q = self.Q_.predict(s, a).data
+            q = self.Q_.predict(s, a).data
         return chainer.cuda.to_cpu(q)
-
 
     def feature(self, s):
         with chainer.no_backprop_mode():
@@ -163,40 +147,28 @@ class Policy(chainer.Chain):
         self.a_dim = 1
         
         initializer = chainer.initializers.HeNormal()
-        c1 = 16
-        c2 = 32
-        c3 = 32
+
         fc_unit = 250
 
         super(Policy, self).__init__(
-            conv0=L.Convolution2D(STATE_LENGTH, c1, 3, stride=1, pad=0),
-            conv1=L.Convolution2D(c1, c2, 3, stride=1, pad=0),
-            conv2=L.Convolution2D(c2, c3, 3, stride=1, pad=0),
+
             fc0=L.Linear(None, fc_unit, initialW=initializer),
-            fc1=L.Linear(fc_unit, 64, initialW=initializer),
-            fc2=L.Linear(64, self.a_dim, initialW=initializer),
-            bnorm0=L.BatchNormalization(c1),
-            bnorm1=L.BatchNormalization(c2),
-            bnorm2=L.BatchNormalization(c3)
+            fc1=L.Linear(fc_unit, self.a_dim, initialW=initializer),
+
             )
 
-    def __call__(self, x):
-        x = x/255.
-        h = F.max_pooling_2d(F.relu(self.bnorm0(self.conv0(x))), 2, stride=2)
-        h = F.max_pooling_2d(F.relu(self.bnorm1(self.conv1(h))), 2, stride=2)
-        h = F.max_pooling_2d(F.relu(self.bnorm2(self.conv2(h))), 2, stride=2)
+    def __call__(self, f):
 
-        h = F.relu(self.fc0(h))
-        h = F.relu(self.fc1(h))
-        y = self.fc2(h)
+        h = F.relu(self.fc0(f))
+        y = self.fc1(h)
+
         return self.squash(y, 
                            self.xp.asarray(self.high),
                            self.xp.asarray(self.low))
 
     def squash(self, x, high, low):
-        center = (high + low) / 2.
-        scale = (high - low) / 2.
-
+        center = (high + low) / 2
+        scale = (high - low) / 2
         return F.tanh(x)*scale + center
 
 class Actor:
@@ -211,26 +183,27 @@ class Actor:
         self.optimizer = optimizers.Adam(alpha=1e-4)
         self.optimizer.setup(self.policy)
 
-    def predict(self, states):
+    def predict(self, features):
+        xp = self.policy.xp
+        #states = xp.expand_dims(
+        #    xp.asarray(features, dtype=np.float32), axis=0)
         with chainer.no_backprop_mode():
-            a = self.policy(states).data
+            a = self.policy(features).data
 
         return chainer.cuda.to_cpu(a)
 
-    def target_predict(self, states):
+    def target_predict(self, features):
 
         with chainer.no_backprop_mode():
-            a = self.policy_(states).data
+            a = self.policy_(features).data
         return chainer.cuda.to_cpu(a)
 
-    def update(self, Q, s, n):
+    def update(self, Q, s, f, n):
         loss = -F.sum(
-            Q(s, self.policy(s) )
+            Q(s, self.policy(f) )
             ) / n
-
         self.policy.cleargrads()
         loss.backward()
-
         self.optimizer.update()
 
     def target_update(self):
@@ -260,46 +233,23 @@ class Agent:
         xp = self.critic.Q.xp
 
         s = xp.asarray([_[0] for _ in mini_batch], dtype=np.float32)
-        
         a = xp.asarray([_[1] for _ in mini_batch], dtype=np.float32)
         a = xp.expand_dims(a, axis=1)
+
         r = xp.asarray([_[2] for _ in mini_batch], dtype=np.float32)
         s_ = xp.asarray([_[3] for _ in mini_batch], dtype=np.float32)
         done = xp.asarray([_[4] for _ in mini_batch], dtype=np.float32)
         
-        q = F.reshape(
-            self.critic.Q(s, a), (n,)
-            ) 
 
+        y, f = self.critic.Q(s, a)
+        q = F.reshape(
+            y, (n,)
+            ) 
+        
         with chainer.no_backprop_mode():
             actions = xp.empty((n,1), dtype=np.float32)
             proto_a = self.actor.target_predict(s_)
 
-
-            a_neighbors = xp.expand_dims(
-                xp.asarray(
-                [ self.neighbors(proto_a[i])for i in range(n)],
-                dtype=np.float32
-                ).T,
-                axis=2)
-
-            
-            #print a_neighbors
-            #f = self.critic.feature(s_)
-            q_val = np.empty((K,n), dtype=np.float32)
-            for i in xrange(K):
-                q_val[i] = self.critic.target_predict(
-                    #f,
-                    s_,
-                    a_neighbors[i]
-                    ).reshape(n)
-            q_val = q_val.T
-            a_neighbors = a_neighbors.T.reshape(n, K, 1)
-            for i in range(n):
-                acts = a_neighbors[i]
-                actions[i][0] = acts[ np.argmax(q_val[i]) ][0]
-            """
-            Mainly reduce computation cost
             a_neighbors = xp.expand_dims(
                 xp.asarray(
                 [ self.neighbors(proto_a[i])[j] for i in range(n) for j in range(K) ],
@@ -307,30 +257,25 @@ class Agent:
                 ),
                 axis=1
                 )
-            f = self.critic.feature(s_)
-            features = xp.asarray(
-                [f[i] for i in range(n) for j in range(K)],
-                dtype=np.float32)
-            q_val = self.critic.target_predict(
-                features,
-                a_neighbors)
 
+            f_ = self.critic.feature(s_)
+
+            features_ = xp.asarray(
+                [f_[i] for i in range(n) for j in range(K)],
+                dtype=np.float32)
+            
+            q_val = self.critic.target_predict(
+                features_,
+                a_neighbors)
+            
             for i in range(n):
                 offset = i*K
                 acts = a_neighbors[offset:offset+K]
                 q_vals = q_val[offset:offset+K]
                 actions[i][0] = acts[ np.argmax(q_vals) ][0]
-             
-            """
-
+            
             """
             Naive
-            #a_neighbors = xp.asarray( 
-            #    [ xp.expand_dims(self.neighbors(proto_a[i]), axis=1) for i in range(n)],
-            #    dtype=np.float32)
-            #states = xp.asarray(
-            #    [s_[i] for i in range(n) for j in range(K)],
-            #    dtype=np.float32)
             for i in range(n):
                 a_neighbors = self.neighbors(proto_a[i])
             
@@ -347,24 +292,25 @@ class Agent:
             """
 
             q_ = F.reshape(
-            self.critic.Q_(s_, actions),
+            self.critic.target_predict(f_, actions),
             (n,)
             )
             t = r + GAMMA*(1-done)*q_
 
-
         self.critic.update(q, t)
-        self.actor.update(self.critic.Q, s, n)
+
+        self.actor.update(self.critic.Q, s, f, n)
         
         self.critic.target_update()
         self.actor.target_update()
+
 
 
     def neighbors(self, a, k=1):
         neighbor = np.empty( (K,), dtype=np.int32)
 
         tmp = a.astype(np.int32)[0]
-
+    
         if tmp <= self.low:
             tmp = self.low
             neighbor[1] = tmp+1
@@ -376,7 +322,6 @@ class Agent:
         else:
             neighbor[1] = tmp+1
             neighbor[2] = tmp-1
-        
 
         neighbor[0] = tmp
 
@@ -400,9 +345,6 @@ class ReplayMemory:
     def sample(self, n): # n = batch size
         n = min(n, len(self.buf))
         return random.sample(self.buf, n)
-
-    def len(self):
-        return len(self.buf)
 
 # ====================
 # Preprocessor
@@ -436,8 +378,6 @@ class Preprocessor:
 def noise():
     return np.random.normal(scale=1.0)
 
-MIN_EPSILON=0.01
-STEPS_TO_DECAY_EPSILON=500000
 def main():
     fig, ax = plt.subplots(1, 1)
 
@@ -455,14 +395,12 @@ def main():
     preprocessor = Preprocessor()
 
     agent = Agent(s_dim, a_num, a_low, a_high)
-    xp = agent.critic.Q.xp
 
     if GPU >= 0:
         chainer.cuda.get_device(GPU).use()
 
     Rs = []
-    
-    step = 0
+
     for episode in range(M):
         obs = env.reset()
 
@@ -475,34 +413,29 @@ def main():
         s = preprocessor.state
 
         while not done and t < env.spec.tags.get('wrapper_config.TimeLimit.max_episode_steps'):
-            state = xp.expand_dims(
-                xp.asarray(s, dtype=np.float32),
-                axis=0)
-
+            
             # get next action
-            #proto_a = agent.actor.predict(state) + noise() # proto_a is on cpu
-            proto_a = agent.actor.predict(state)
+            xp = agent.critic.Q.xp
+            f = agent.critic.feature(xp.expand_dims(xp.asarray(s, dtype=np.float32), axis=0))
+            proto_a = agent.actor.predict(f) + noise() # proto_a is on cpu
             neighbors = agent.neighbors(proto_a) # neighbors on gpu
-            ss = xp.asarray(
-                [s for _ in xrange(K)],
-                dtype=np.float32)
 
+            xp = agent.critic.Q.xp
+            features = xp.asarray(
+                [f for _ in range(len(neighbors))], 
+                dtype=np.float32)
+            print features.shape
             q_val = agent.critic.predict(
-                ss,
-                xp.expand_dims(neighbors.astype(np.float32),
-                               axis=1)                
+                    features,
+                    xp.expand_dims(neighbors.astype(np.float32),
+                                  axis=1)
                 )
 
-            a = chainer.cuda.to_cpu(neighbors[int(xp.argmax(q_val))])
-            
-            epsilon = 1.0 if agent.D.len() < REPLAY_START_SIZE else \
-                max(MIN_EPSILON, np.interp(
-                    step, [0, STEPS_TO_DECAY_EPSILON], [1.0, MIN_EPSILON]))
-            
-            if np.random.rand() < epsilon:
-                a = env.action_space.sample()
+            a = chainer.cuda.to_cpu(neighbors[np.argmax(q_val)])
+
             # execute action
-            obs_, r, done, info = env.step(a)  
+            obs_, r, done, info = env.step(a)
+            
             s_ = preprocessor.obs2state(obs_)
             
             if RENDER:
@@ -512,13 +445,14 @@ def main():
 
             agent.observe( (s, a, r*REWARD_SCALE, s_, done) )
             if len(agent.D.buf) >= REPLAY_START_SIZE:
+                print ("Updating...")
+                print ("Reward %f")%(R)
                 agent.update()
 
             s = s_
 
             t += 1
-            step += 1
-            #print step
+        
         print("Total Reward:", R)
         
         Rs.append(R)
