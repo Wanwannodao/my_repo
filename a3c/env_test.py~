@@ -1,0 +1,13 @@
+from Environment import Environment
+import numpy as np
+from PIL import Image
+P_FNAME="mem.log"
+T_FNAME="thread_map_{}.csv"
+K_FNAME="test"
+THREAD_NUM=512
+env = Environment(THREAD_NUM, P_FNAME, T_FNAME.format(0), K_FNAME, comp=True)
+state = env.reset()
+#print ("{}".format(state[0]))
+#img = Image.fromarray(state[0], 'L')
+#img.show()
+s_, r, done, _ = env.step(5)
